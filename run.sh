@@ -13,5 +13,12 @@ clang++ \
     -fno-sanitize-recover \
     main.cc -o main
 
+
+if [ -z "$1" ]; then
+    seed=1
+else
+    seed="$1"
+fi
+
 time java -jar tester/tester.jar \
-    -exec "./driver.sh" -seed 1 #-vis
+    -exec "./driver.sh" -seed "$seed" #-vis
