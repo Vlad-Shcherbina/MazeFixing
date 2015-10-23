@@ -64,11 +64,42 @@ Coord unpack(PackedCoord p) {
 }
 
 
+const int RED = 31;
+const int GREEN = 32;
+const int YELLOW = 33;
+const int BLUE = 34;
+const int MAGENTA = 35;
+const int CYAN = 36;
+const int WHITE = 37;
+
+void draw_maze(std::function<int (PackedCoord)> color_fn) {
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            if (maze[y][x] == 'E')
+                cerr << "\033[7";  // inverse
+            else
+                cerr << "\033[0";
+            int color = color_fn(pack(x, y));
+            if (color != -1) {
+                assert(color >= 30);
+                assert(color <= 37);
+                cerr << ";" << color;
+            }
+            cerr << "m";
+
+            cerr << maze[y][x];
+            cerr << "\033[0m";  // default
+            cerr << " ";
+        }
+        cerr << endl;
+    }
+}
+
+
 typedef PackedCoord Vertex;
 const Vertex ENTER = 0;
 const Vertex EXIT = 9999;
 const Vertex INVALID = 42424;
-
 
 const int DIRS[4][2] = {{1, 0}, {0, -1}, {-1, 0}, {0, 1}};
 
@@ -98,80 +129,16 @@ struct Spin {
         dir += 3;
         dir %= 4;
     }
+
+    int code() const {
+        return pack(x, y) * 4 + dir;
+    }
 };
 
 std::ostream& operator<<(std::ostream &out, Spin s) {
     out << "Spin(" << s.x << ", " << s.y << ", " << s.dir << ")";
     return out;
 }
-
-
-class SolutionChecker {
-private:
-    vector<Coord> current_path;
-public:
-    set<Coord> covered;
-    void trace(Spin spin) {
-        int original_size = current_path.size();
-
-        // Tail recursion
-        while (true) {
-            Coord pos = spin.get_coord();
-
-            // PERF: potentially quadratic
-            if (find(current_path.begin(), current_path.end(), pos) !=
-                current_path.end()) {
-                break;
-            }
-
-            char c = maze[pos.second][pos.first];
-
-            if (c == '.') {
-                // debug(current_path);
-                copy(current_path.begin(), current_path.end(),
-                     inserter(covered, covered.end()));
-                break;
-            }
-
-            current_path.push_back(pos);
-
-            switch (c) {
-            case 'E':
-                for (Dir dir = 0; dir < 4; dir++) {
-                    Spin s2 = spin;
-                    s2.dir = dir;
-                    s2.advance();
-                    if (dir < 3)
-                        trace(s2);
-                    else
-                        spin = s2;  // last one is tail call
-                }
-                continue;
-            case 'S':
-                spin.advance();
-                continue;
-            case 'L':
-                spin.turn_left();
-                spin.advance();
-                continue;
-            case 'R':
-                spin.turn_right();
-                spin.advance();
-                continue;
-            case 'U':
-                spin.turn_left();
-                spin.turn_left();
-                spin.advance();
-                continue;
-            default:
-                assert(false);
-            }
-        }
-
-        assert(current_path.size() >= original_size);
-        current_path.resize(original_size);
-    }
-};
 
 
 vector<pair<Vertex, Spin>> enumerate_starting_points() {
@@ -278,82 +245,36 @@ ostream& operator<<(ostream &out, const CellSet &cs) {
 }
 
 
-// TODO: also return covered cells
-Vertex trace(Spin s, CellSet &cell_set) {
-    vector<PackedCoord> visited;
-    while (true) {
-        char c = maze[s.y][s.x];
-        if (c == '.') {
-            return EXIT;
-        }
-        if (c == 'E') {
-            return pack(s.x, s.y);
-        }
-        PackedCoord pos = pack(s.x, s.y);
-        if (find(visited.begin(), visited.end(), pos) != visited.end()) {
-            return INVALID;
-        }
-        visited.push_back(pos);
-        cell_set.add_cell(pos);
-        switch (c) {
-        case 'S':
-            s.advance();
-            break;
-        case 'L':
-            s.turn_left();
-            s.advance();
-            break;
-        case 'R':
-            s.turn_right();
-            s.advance();
-            break;
-        case 'U':
-            s.turn_left();
-            s.turn_left();
-            s.advance();
-            break;
-        default:
-            assert(false);
-        }
-    }
-}
-
-
-int eval_maze() {
-    SolutionChecker checker;
-    for (Spin enter : find_enters()) {
-        checker.trace(enter);
-    }
-    return checker.covered.size();
-}
-
-
 struct Edge {
 private:
     Vertex _from;
     Vertex _to;
-    map<PackedCoord, char> edits;
-    Spin start_spin;
+    map<PackedCoord, char> _edits;
+    Spin _start_spin;
+    Spin _end_spin;
     CellSet _path_cells;
 
 public:
+    Edge() = default;
     Edge(
         Vertex from,
         Vertex to,
         const map<PackedCoord, char> &edits,
         Spin start_spin,
+        Spin end_spin,
         const vector<PackedCoord> path)
-        : _from(from), _to(to), edits(edits), start_spin(start_spin)
+        : _from(from), _to(to), _edits(edits),
+          _start_spin(start_spin), _end_spin(end_spin)
     {
         for (PackedCoord p : path)
             _path_cells.add_cell(p);
     }
 
     bool contradicts(const Edge &other) const {
-        for (auto kv : edits)
+        for (auto kv : _edits)
             if (other._path_cells.contains(kv.first))
                 return true;
-        for (auto kv : other.edits)
+        for (auto kv : other._edits)
             if (_path_cells.contains(kv.first))
                 return true;
         return false;
@@ -363,7 +284,17 @@ public:
     int to() const { return _to; }
     int path_length() const { return _path_cells.size(); }
     const CellSet& path_cells() const { return _path_cells; }
+    Spin start_spin() const { return _start_spin; }
+    Spin end_spin() const { return _end_spin; }
+    const map<PackedCoord, char>& edits() const { return _edits; };
 };
+
+ostream& operator<<(ostream &out, const Edge &e) {
+    out << "Edge(from=" << e.from()
+        << ", to=" << e.to()
+        << ", edits=" << e.edits() << ")";
+    return out;
+}
 
 
 class EdgeFinder {
@@ -375,8 +306,8 @@ private:
     Spin start_spin;
     Vertex from;
 
-    void add_edge(Vertex to) {
-        edges.emplace_back(from, to, edits, start_spin, current_path);
+    void add_edge(Spin end_spin, Vertex to) {
+        edges.emplace_back(from, to, edits, start_spin, end_spin, current_path);
     }
 
     void trace(Spin s, int num_edits) {
@@ -384,7 +315,8 @@ private:
         if (c == '.' || c == 'E') {
             if (num_edits == 0) {
                 Vertex to = c == '.' ? EXIT : pack(s.x, s.y);
-                add_edge(to);
+                if (from != to)
+                    add_edge(s, to);
             }
             return;
         }
@@ -423,13 +355,15 @@ private:
 
         if (num_edits > 0) {
             for (Dir d = 0; d < 4; d++) {
-                if (d != new_dir) {
-                    edits[pos] = "SLUR"[(4 + d - s.dir) % 4];
-                    new_spin = s;
-                    new_spin.dir = d;
-                    new_spin.advance();
-                    trace(new_spin, num_edits - 1);
-                }
+                if (d == new_dir)
+                    continue;
+                if (current_path.size() > 1 && (d ^ s.dir) == 2)
+                    continue;
+                edits[pos] = "SLUR"[(4 + d - s.dir) % 4];
+                new_spin = s;
+                new_spin.dir = d;
+                new_spin.advance();
+                trace(new_spin, num_edits - 1);
             }
             edits.erase(pos);
         }
@@ -496,16 +430,20 @@ ostream& operator<<(ostream& out, const CellMultiSet &cms) {
 }
 
 
-typedef map<Vertex, vector<Edge>> Graph;
-
 class GraphChecker {
 private:
-    const Graph &graph;
+    map<Vertex, vector<const Edge*>> graph;
     vector<Vertex> current_path;
     vector<const Edge*> current_edges;
 public:
     CellSet covered;
-    GraphChecker(const Graph &graph) : graph(graph) {}
+    set<PackedCoord> forward_reachable;
+
+    GraphChecker(const vector<const Edge*> edges) {
+        for (auto e : edges) {
+            graph[e->from()].push_back(e);
+        }
+    }
 
     int get_covered_area() const {
         return covered.size();
@@ -520,6 +458,7 @@ public:
 
     void rec() {
         Vertex v = current_path.back();
+
         if (v == EXIT) {
             for (Vertex p : current_path)
                 if (p != ENTER && p != EXIT)
@@ -529,19 +468,23 @@ public:
             return;
         }
 
+        if (v != ENTER) {
+            forward_reachable.insert(v);
+        }
+
         auto kv = graph.find(v);
         if (kv == graph.end()) {
             return;
         }
 
-        for (const auto& e : kv->second) {
-            Vertex w = e.to();
+        for (auto e : kv->second) {
+            Vertex w = e->to();
             if (find(current_path.begin() + 1, current_path.end(), w) !=
                 current_path.end())
                 continue;
             bool overlaps = false;
             for (const Edge* pe : current_edges) {
-                if (e.path_cells().overlaps(pe->path_cells())) {
+                if (e->path_cells().overlaps(pe->path_cells())) {
                     overlaps = true;
                     break;
                 }
@@ -550,17 +493,18 @@ public:
                 continue;
 
             current_path.push_back(w);
-            current_edges.push_back(&e);
+            current_edges.push_back(e);
 
             rec();
 
             assert(current_path.back() == w);
             current_path.pop_back();
-            assert(current_edges.back() == &e);
+            assert(current_edges.back() == e);
             current_edges.pop_back();
         }
     }
 };
+
 
 class MazeFixing {
 public:
@@ -579,51 +523,13 @@ public:
         for (const string &row : maze)
             total_cells += row.size() - count(row.begin(), row.end(), '.');
 
-        for (const string &row : maze) {
-            for (char c : row) {
-                cerr << c << ' ';
-            }
-            cerr << endl;
-        }
-
         int num_e = 0;
         for (const string &row : maze)
             num_e += count(row.begin(), row.end(), 'E');
         debug(num_e);
 
-        SolutionChecker checker;
-        for (Spin enter : find_enters()) {
-            checker.trace(enter);
-        }
-
-        for (int i = 0; i < H; i++) {
-            for (int j = 0; j < W; j++) {
-                if (checker.covered.count({j, i}) > 0)
-                    cerr << "* ";
-                else
-                    cerr << ". ";
-            }
-            cerr << endl;
-        }
-
-        {
-            map<pair<bool, bool>, int> cnt;
-            for (auto p : enumerate_starting_points()) {
-                Vertex start = p.first;
-                CellSet cell_set;
-                Vertex end = trace(p.second, cell_set);
-                if (end != INVALID && start != end) {
-                    cnt[{start == ENTER, end == EXIT}]++;
-                }
-            }
-            debug(cnt);
-        }
-
         vector<Edge> candidate_edges;
-
-        Graph graph;
-
-        for (int num_edits = 0; num_edits < 1; num_edits++) {
+        for (int num_edits = 0; num_edits <= 5; num_edits++) {
             debug(num_edits);
 
             map<pair<int, int>, int> cnt;
@@ -636,38 +542,82 @@ public:
                 ef.trace(start, p.second, num_edits);
             }
             for (Edge &e : ef.edges) {
-                if (num_edits == 0)
-                    graph[e.from()].push_back(e);
+                candidate_edges.push_back(e);
 
-                if (e.from() == ENTER && e.to() == EXIT)
-                    candidate_edges.push_back(e);
-
-                cnt[{e.from() == ENTER, e.to() == EXIT}]++;
+                cnt[{e.from(), e.to() == EXIT}]++;
                 lengths[e.path_length()]++;
             }
-            debug(cnt);
-            debug(cnt.size());
-            debug(lengths);
+            // debug(cnt);
+            // debug(cnt.size());
+            // debug(lengths);
         }
         debug(candidate_edges.size());
 
-        double predicted_score = 1.0 * checker.covered.size() / total_cells;
+        vector<const Edge*> actual_edges;
+        for (const Edge &e : candidate_edges) {
+            if (e.edits().empty())
+                actual_edges.push_back(&e);
+        }
+        GraphChecker gc {actual_edges};
+        gc.trace(ENTER);
+        // debug(gc.covered);
+
+        double predicted_score = 1.0 * gc.get_covered_area() / total_cells;
         debug(predicted_score);
 
-        for (int i = 0; i < 1; i++)
-            eval_maze();
-
-        for (int i = 0; i < 1; i++) {
-            GraphChecker gc {graph};
-            gc.trace(ENTER);
-            // debug(gc.covered);
-            debug(1.0 * gc.get_covered_area() / total_cells);
-        }
+        draw_maze([&](PackedCoord p) {
+            if (gc.covered.contains(p))
+                return RED;
+            else if (gc.forward_reachable.count(p) > 0)
+                return GREEN;
+            return -1;
+        });
 
         vector<string> result;
 
+        /// Very greedy solution
+
+        sort(candidate_edges.begin(), candidate_edges.end(),
+            [](const Edge &e1, const Edge &e2){
+                return e1.path_cells().size() > e2.path_cells().size();
+            });
+        int remaining_edits = F;
+        vector<Edge> solution;
+        for (const Edge &e : candidate_edges) {
+            bool contradicts = false;
+            for (const Edge &pe : solution) {
+                if (pe.contradicts(e)) {
+                    contradicts = true;
+                    break;
+                }
+            }
+            if (contradicts)
+                continue;
+
+            if (e.edits().size() <= remaining_edits) {
+                solution.push_back(e);
+                remaining_edits -= e.edits().size();
+            }
+        }
+        for (const Edge &e : solution) {
+            for (auto kv : e.edits()) {
+                PackedCoord p = kv.first;
+                result.push_back(
+                    format_result(unpack_x(p), unpack_y(p), kv.second));
+            }
+        }
+        draw_maze([&](PackedCoord p) {
+            for (const Edge &e : solution)
+                if (e.path_cells().contains(p))
+                    return RED;
+            return -1;
+        });
+
+        debug2(result.size(), F);
+
         double total_time = get_time() - start;
         debug(total_time);
+
         return result;
     }
 
