@@ -529,7 +529,7 @@ public:
         debug(num_e);
 
         vector<Edge> candidate_edges;
-        for (int num_edits = 0; num_edits <= 5; num_edits++) {
+        for (int num_edits = 0; num_edits <= 4; num_edits++) {
             debug(num_edits);
 
             map<pair<int, int>, int> cnt;
@@ -542,7 +542,10 @@ public:
                 ef.trace(start, p.second, num_edits);
             }
             for (Edge &e : ef.edges) {
-                candidate_edges.push_back(e);
+                // TODO: this constraint is temporary,
+                // just to improve greedy solution
+                if (e.from() == ENTER || e.to() == EXIT || e.from() < e.to())
+                    candidate_edges.push_back(e);
 
                 cnt[{e.from(), e.to() == EXIT}]++;
                 lengths[e.path_length()]++;
@@ -575,7 +578,7 @@ public:
 
         vector<string> result;
 
-        /// Very greedy solution
+        /// Greedy solution
 
         sort(candidate_edges.begin(), candidate_edges.end(),
             [](const Edge &e1, const Edge &e2){
@@ -597,8 +600,14 @@ public:
             if (e.edits().size() <= remaining_edits) {
                 solution.push_back(e);
                 remaining_edits -= e.edits().size();
+
+                if (get_time() > start + TIME_LIMIT) {
+                    cerr << "TIME LIMIT" << endl;
+                    break;
+                }
             }
         }
+
         for (const Edge &e : solution) {
             for (auto kv : e.edits()) {
                 PackedCoord p = kv.first;
