@@ -175,6 +175,9 @@ vector<Spin> find_enters() {
 }
 
 
+typedef vector<int> Counter;  // indices are PackedCoords
+
+
 class CellSet {
 private:
     mutable vector<PackedCoord> cells;
@@ -224,6 +227,32 @@ public:
         return binary_search(cells.begin(), cells.end(), p);
     }
 
+    int new_in_counter(const Counter &counter) const {
+        int result = 0;
+        for (PackedCoord p : cells) {
+            if (counter[p] == 0)
+                result++;
+        }
+        return result;
+    }
+
+    int add_to_counter(Counter &counter) const {
+        ensure_sorted();
+        int result = 0;
+        for (PackedCoord p : cells) {
+            if (counter[p] == 0)
+                result++;
+            counter[p]++;
+        }
+        return result;
+    }
+
+    void subtract_from_counter(Counter &counter) const {
+        for (PackedCoord p : cells) {
+            counter[p]--;
+        }
+    }
+
     const vector<PackedCoord>& get_cells() const {
         return cells;
     }
@@ -247,8 +276,8 @@ ostream& operator<<(ostream &out, const CellSet &cs) {
 
 struct Edge {
 private:
-    Vertex _from;
-    Vertex _to;
+    mutable Vertex _from;
+    mutable Vertex _to;
     map<PackedCoord, char> _edits;
     Spin _start_spin;
     Spin _end_spin;
@@ -287,6 +316,15 @@ public:
     Spin start_spin() const { return _start_spin; }
     Spin end_spin() const { return _end_spin; }
     const map<PackedCoord, char>& edits() const { return _edits; };
+
+    // it's constness makes is a hack
+    void flip() const {
+        swap(_from, _to);
+        if (_from == EXIT)
+            _from = ENTER;
+        if (_to == ENTER)
+            _to = EXIT;
+    }
 };
 
 ostream& operator<<(ostream &out, const Edge &e) {
@@ -468,9 +506,7 @@ public:
             return;
         }
 
-        if (v != ENTER) {
-            forward_reachable.insert(v);
-        }
+        forward_reachable.insert(v);
 
         auto kv = graph.find(v);
         if (kv == graph.end()) {
@@ -506,6 +542,298 @@ public:
 };
 
 
+vector<Edge> candidate_edges;
+
+
+typedef vector<const Edge*> Graph;
+
+
+set<Vertex> reachable(const Graph &graph, bool forward) {
+    set<Vertex> result;
+    if (forward)
+        result.insert(ENTER);
+    else
+        result.insert(EXIT);
+
+    while (true) {
+        bool changed = false;
+        for (auto e : graph) {
+            int from = forward ? e->from() : e->to();
+            int to = forward ? e->to() : e->from();
+            if (result.count(from) > 0 && result.count(to) == 0) {
+                result.insert(to);
+                changed = true;
+            }
+        }
+        if (!changed)
+            break;
+    }
+    return result;
+}
+
+set<Vertex> compute_forward_reachable(const Graph &graph) {
+    GraphChecker gc {graph};
+    gc.trace(ENTER);
+    return gc.forward_reachable;
+}
+
+set<Vertex> compute_backward_reachable(const Graph &graph) {
+    for (auto e : graph)
+        e->flip();
+    GraphChecker gc {graph};
+    gc.trace(ENTER);
+    for (auto e : graph)
+        e->flip();
+    return gc.forward_reachable;
+}
+
+
+Graph greedy_fill(const Graph &other_edges, PackedCoord pt, int budget, bool prune_unreachable) {
+    assert(maze[unpack_y(pt)][unpack_x(pt)] == 'E');
+    if (budget > 19)
+        budget = 19;
+    vector<Graph> incoming_candidates(20);
+    vector<Graph> outgoing_candidates(20);
+
+    for (const Edge &e : candidate_edges) {
+        if (e.from() != pt && e.to() != pt)
+            continue;
+
+        bool contradicts = false;
+        for (auto e2 : other_edges)
+            if (e.contradicts(*e2)) {
+                contradicts = true;
+                break;
+            }
+        if (contradicts)
+           continue;
+
+        if (e.from() == pt)
+            outgoing_candidates[e.edits().size()].push_back(&e);
+        if (e.to() == pt)
+            incoming_candidates[e.edits().size()].push_back(&e);
+    }
+
+    /*for (auto candidates : {&incoming_candidates, &outgoing_candidates}) {
+        for (auto &ic : *candidates) {
+            sort(ic.begin(), ic.end(), [](const Edge *e1, const Edge *e2){
+                return e1->path_cells().size() > e2->path_cells().size();
+            });
+            if (ic.size() > 20)
+                ic.resize(20);
+        }
+    }*/
+
+    set<Vertex> forward_reachable;
+    if (prune_unreachable)
+        forward_reachable = compute_forward_reachable(other_edges);
+    set<Vertex> backward_reachable;
+    if (prune_unreachable)
+        backward_reachable = compute_backward_reachable(other_edges);
+    // debug(forward_reachable);
+    // debug(backward_reachable);
+
+    // debug(outgoing_candidates.size());
+    // debug(incoming_candidates.size());
+
+    Graph best_solution;
+    double best_solution_score = -100;
+
+    Counter counter(pack(W - 1, H - 1));
+    for (auto oe : other_edges)
+        oe->path_cells().add_to_counter(counter);
+
+    Graph incoming;
+    Graph outgoing;
+    int covered = 0;
+
+    auto contradicts_existing= [&](const Edge *e) {
+        for (auto e2 : incoming) {
+            if (e == e2 || e->contradicts(*e2))
+                return true;
+        }
+        for (auto e2 : outgoing) {
+            if (e == e2 || e->contradicts(*e2))
+                return true;
+        }
+        return false;
+    };
+
+    std::function<void(int)> rec;
+    rec = [&](int budget) {
+        assert(budget >= 0);
+
+        if (!outgoing.empty() && !incoming.empty()) {
+            // TODO: more accurate counting
+            set<Vertex> endpoints;
+
+            double score = covered;
+            for (auto e : incoming) {
+                //score += e->path_cells().size();
+                endpoints.insert(e->from());
+
+                if (forward_reachable.count(e->from()) > 0)
+                    score += 10;
+            }
+            for (auto e : outgoing) {
+                //score += e->path_cells().size();
+                endpoints.insert(e->to());
+
+                if (backward_reachable.count(e->from()) > 0)
+                    score += 10;
+            }
+            score += 0.001 * budget;
+            score += 0.1 * endpoints.size();
+
+            if (score > best_solution_score) {
+                best_solution_score = score;
+                best_solution = incoming;
+                copy(outgoing.begin(), outgoing.end(),
+                     back_inserter(best_solution));
+            }
+        }
+
+        if (outgoing.size() < incoming.size() + 0.01 * (rand() % 2)) {
+            // adding outgoing
+
+            for (int i = 0; i <= budget; i++) {
+                const Edge *best_edge = nullptr;
+                double best_score = -1000;
+                for (auto new_edge : outgoing_candidates[i]) {
+                    // if (prune_unreachable &&
+                    //     backward_reachable.count(new_edge->to()) == 0)
+                    //     continue;
+
+                    if (contradicts_existing(new_edge))
+                        continue;
+
+                    bool reachable = incoming.size() == 0;
+                    for (auto ie : incoming) {
+                        if (ie->from() != new_edge->to() &&
+                            !ie->path_cells().overlaps(new_edge->path_cells())) {
+                            reachable = true;
+                            break;
+                        }
+                    }
+                    if (!reachable)
+                        continue;
+
+                    double score = new_edge->path_cells().new_in_counter(counter);
+                    if (score > best_score) {
+                        best_score = score;
+                        best_edge = new_edge;
+                    }
+                }
+
+                if (best_edge != nullptr) {
+                    outgoing.push_back(best_edge);
+                    int delta_covered = best_edge->path_cells().add_to_counter(counter);
+                    covered += delta_covered;
+
+                    rec(budget - best_edge->edits().size());
+
+                    assert(outgoing.back() == best_edge);
+                    outgoing.pop_back();
+                    best_edge->path_cells().subtract_from_counter(counter);
+                    covered -= delta_covered;
+                }
+            }
+        } else {
+            // adding incoming
+
+            for (int i = 0; i <= budget; i++) {
+                const Edge *best_edge = nullptr;
+                double best_score = -1000;
+                for (auto new_edge : incoming_candidates[i]) {
+                    // if (prune_unreachable &&
+                    //     forward_reachable.count(new_edge->from()) == 0)
+                    //     continue;
+
+                    if (contradicts_existing(new_edge))
+                        continue;
+
+                    bool reachable = outgoing.size() == 0;
+                    for (auto oe : outgoing) {
+                        if (oe->to() != new_edge->from() &&
+                            !oe->path_cells().overlaps(new_edge->path_cells())) {
+                            reachable = true;
+                            break;
+                        }
+                    }
+                    if (!reachable)
+                        continue;
+
+                    double score = new_edge->path_cells().new_in_counter(counter);
+                    if (score > best_score) {
+                        best_score = score;
+                        best_edge = new_edge;
+                    }
+                }
+
+                if (best_edge != nullptr) {
+                    incoming.push_back(best_edge);
+                    int delta_covered = best_edge->path_cells().add_to_counter(counter);
+                    covered += delta_covered;
+
+                    rec(budget - best_edge->edits().size());
+
+                    assert(incoming.back() == best_edge);
+                    incoming.pop_back();
+                    best_edge->path_cells().subtract_from_counter(counter);
+                    covered -= delta_covered;
+                }
+            }
+        }
+    };
+
+    rec(budget);
+    assert(covered == 0);
+
+/*
+    debug(best_solution_score);
+    debug(best_solution.size());
+    for (auto e : best_solution)
+        debug(*e);
+
+    draw_maze([&](PackedCoord p) {
+        if (p == pt)
+            return CYAN;
+        bool out = false;
+        bool in = false;
+
+        for (auto e : best_solution) {
+            if (e->edits().count(p) > 0)
+                return BLUE;
+            if (e->to() == pt) {
+                if (e->path_cells().contains(p) || e->from() == p)
+                    in = true;
+            } else {
+                assert(e->from() == pt);
+                if (e->path_cells().contains(p) || e->to() == p)
+                    out = true;
+            }
+        }
+
+        if (in && out)
+            return YELLOW;
+        if (in && !out)
+            return GREEN;
+        if (!in && out)
+            return RED;
+        return -1;
+    });*/
+
+    return best_solution;
+}
+
+void remove_vertex(Graph &graph, PackedCoord pt) {
+    auto end = remove_if(graph.begin(), graph.end(), [pt](const Edge *e){
+        return e->from() == pt || e->to() == pt;
+    });
+    graph.erase(end, graph.end());
+}
+
+
 class MazeFixing {
 public:
     vector<string> improve(vector<string> maze, int F) {
@@ -523,12 +851,16 @@ public:
         for (const string &row : maze)
             total_cells += row.size() - count(row.begin(), row.end(), '.');
 
-        int num_e = 0;
-        for (const string &row : maze)
-            num_e += count(row.begin(), row.end(), 'E');
-        debug(num_e);
+        vector<PackedCoord> es;
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                if (maze[y][x] == 'E')
+                    es.push_back(pack(x, y));
+            }
+        }
+        debug(es.size());
 
-        vector<Edge> candidate_edges;
+        candidate_edges.clear();
         for (int num_edits = 0; num_edits <= 4; num_edits++) {
             debug(num_edits);
 
@@ -542,15 +874,12 @@ public:
                 ef.trace(start, p.second, num_edits);
             }
             for (Edge &e : ef.edges) {
-                // TODO: this constraint is temporary,
-                // just to improve greedy solution
-                if (e.from() == ENTER || e.to() == EXIT || e.from() < e.to())
-                    candidate_edges.push_back(e);
+                candidate_edges.push_back(e);
 
                 cnt[{e.from(), e.to() == EXIT}]++;
                 lengths[e.path_length()]++;
             }
-            // debug(cnt);
+            debug(cnt);
             // debug(cnt.size());
             // debug(lengths);
         }
@@ -568,59 +897,119 @@ public:
         double predicted_score = 1.0 * gc.get_covered_area() / total_cells;
         debug(predicted_score);
 
-        draw_maze([&](PackedCoord p) {
+        /*draw_maze([&](PackedCoord p) {
             if (gc.covered.contains(p))
                 return RED;
             else if (gc.forward_reachable.count(p) > 0)
                 return GREEN;
             return -1;
-        });
+        });*/
 
         vector<string> result;
 
-        /// Greedy solution
+        Graph solution;
+        for (int i = 0; i < 2; i++) {
+            debug(i);
+            for (PackedCoord pt : es) {
+                remove_vertex(solution, pt);
 
-        sort(candidate_edges.begin(), candidate_edges.end(),
-            [](const Edge &e1, const Edge &e2){
-                return e1.path_cells().size() > e2.path_cells().size();
+                int budget = F;
+                for (auto e : solution)
+                    budget -= e->edits().size();
+
+                auto new_edges = greedy_fill(
+                    solution, pt,
+                    min<int>(2 * F / es.size(), budget),
+                    /*prune_unreachable*/ i > 0);
+                copy(new_edges.begin(), new_edges.end(),
+                     back_inserter(solution));
+            }
+
+            set<Vertex> forward_reachable = compute_forward_reachable(solution);
+            set<Vertex> backward_reachable = compute_backward_reachable(solution);
+
+            draw_maze([&](PackedCoord p) {
+                for (auto e : solution) {
+                    if (e->path_cells().contains(p))
+                        return BLUE;
+                }
+
+                bool out = forward_reachable.count(p) > 0;
+                bool in = backward_reachable.count(p) > 0;
+                if (in && out)
+                    return YELLOW;
+                if (in && !out)
+                    return GREEN;
+                if (!in && out)
+                    return RED;
+                return -1;
             });
-        int remaining_edits = F;
-        vector<Edge> solution;
-        for (const Edge &e : candidate_edges) {
-            bool contradicts = false;
-            for (const Edge &pe : solution) {
-                if (pe.contradicts(e)) {
-                    contradicts = true;
-                    break;
-                }
-            }
-            if (contradicts)
-                continue;
 
-            if (e.edits().size() <= remaining_edits) {
-                solution.push_back(e);
-                remaining_edits -= e.edits().size();
-
-                if (get_time() > start + TIME_LIMIT) {
-                    cerr << "TIME LIMIT" << endl;
-                    break;
-                }
-            }
         }
 
-        for (const Edge &e : solution) {
-            for (auto kv : e.edits()) {
+        debug(solution.size());
+
+        Counter counter(pack(W - 1, H - 1));
+        for (auto oe : solution)
+            oe->path_cells().add_to_counter(counter);
+
+        auto contradicts_existing = [&](const Edge *e) {
+            for (auto e2 : solution) {
+                if (e == e2 || e->contradicts(*e2))
+                    return true;
+            }
+            return false;
+        };
+
+        set<Vertex> forward_reachable = compute_forward_reachable(solution);
+        set<Vertex> backward_reachable = compute_backward_reachable(solution);
+        while (true) {
+            int budget = F;
+            for (auto e : solution)
+                budget -= e->edits().size();
+
+            double best_score = 0;
+            const Edge *best_edge = nullptr;
+            for (const auto &e : candidate_edges) {
+                if (e.edits().size() > budget)
+                    continue;
+                if (contradicts_existing(&e))
+                    continue;
+                if (forward_reachable.count(e.from()) == 0)
+                    continue;
+                if (backward_reachable.count(e.to()) == 0)
+                    continue;
+
+                double score = e.path_cells().new_in_counter(counter) / (e.edits().size() + 1.0);
+                if (score > best_score) {
+                    best_score = score;
+                    best_edge = &e;
+                }
+            }
+
+            if (best_edge == nullptr)
+                break;
+
+            debug(*best_edge);
+            solution.push_back(best_edge);
+            best_edge->path_cells().add_to_counter(counter);
+        }
+
+
+        for (const Edge *e : solution) {
+            for (auto kv : e->edits()) {
                 PackedCoord p = kv.first;
                 result.push_back(
                     format_result(unpack_x(p), unpack_y(p), kv.second));
             }
         }
         draw_maze([&](PackedCoord p) {
-            for (const Edge &e : solution)
-                if (e.path_cells().contains(p))
-                    return RED;
+            for (const Edge *e : solution)
+                if (e->path_cells().contains(p))
+                    return GREEN;
             return -1;
         });
+
 
         debug2(result.size(), F);
 
