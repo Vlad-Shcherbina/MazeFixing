@@ -843,7 +843,7 @@ public:
         ::maze = maze;
         ::original_maze = maze;
 
-        double start = get_time();
+        double start_time = get_time();
 
         debug3(W, H, F);
 
@@ -860,8 +860,12 @@ public:
         }
         debug(es.size());
 
+        int qq = 0;
+
         candidate_edges.clear();
-        for (int num_edits = 0; num_edits <= 4; num_edits++) {
+        for (int num_edits = 0; num_edits <= 5; num_edits++) {
+            if (num_edits == 5 && es.size() > 30)
+                break;
             debug(num_edits);
 
             map<pair<int, int>, int> cnt;
@@ -872,6 +876,11 @@ public:
             for (auto p : enumerate_starting_points()) {
                 Vertex start = p.first;
                 ef.trace(start, p.second, num_edits);
+
+                if (++qq % 50 == 0 && get_time() > start_time + TIME_LIMIT * 0.4) {
+                    cerr << "candidates time limit" << endl;
+                    break;
+                }
             }
             for (Edge &e : ef.edges) {
                 candidate_edges.push_back(e);
@@ -923,6 +932,11 @@ public:
                     /*prune_unreachable*/ i > 0);
                 copy(new_edges.begin(), new_edges.end(),
                      back_inserter(solution));
+
+                if (++qq % 50 == 0 && get_time() > start_time + TIME_LIMIT * 0.8) {
+                    cerr << "greedy time limit" << endl;
+                    break;
+                }
             }
 
             set<Vertex> forward_reachable = compute_forward_reachable(solution);
@@ -964,6 +978,11 @@ public:
         set<Vertex> forward_reachable = compute_forward_reachable(solution);
         set<Vertex> backward_reachable = compute_backward_reachable(solution);
         while (true) {
+            if (++qq % 2 == 0 && get_time() > start_time + TIME_LIMIT) {
+                cerr << "improvement time limit" << endl;
+                break;
+            }
+
             int budget = F;
             for (auto e : solution)
                 budget -= e->edits().size();
@@ -973,6 +992,8 @@ public:
             for (const auto &e : candidate_edges) {
                 if (e.edits().size() > budget)
                     continue;
+                if (e.path_cells().size() / (e.edits().size() + 2.0) <= best_score)
+                    continue;
                 if (contradicts_existing(&e))
                     continue;
                 if (forward_reachable.count(e.from()) == 0)
@@ -980,7 +1001,7 @@ public:
                 if (backward_reachable.count(e.to()) == 0)
                     continue;
 
-                double score = e.path_cells().new_in_counter(counter) / (e.edits().size() + 1.0);
+                double score = e.path_cells().new_in_counter(counter) / (e.edits().size() + 2.0);
                 if (score > best_score) {
                     best_score = score;
                     best_edge = &e;
@@ -990,7 +1011,7 @@ public:
             if (best_edge == nullptr)
                 break;
 
-            debug(*best_edge);
+            debug2(best_score, *best_edge);
             solution.push_back(best_edge);
             best_edge->path_cells().add_to_counter(counter);
         }
@@ -1013,7 +1034,7 @@ public:
 
         debug2(result.size(), F);
 
-        double total_time = get_time() - start;
+        double total_time = get_time() - start_time;
         debug(total_time);
 
         return result;
