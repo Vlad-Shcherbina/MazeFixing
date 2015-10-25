@@ -73,6 +73,7 @@ const int CYAN = 36;
 const int WHITE = 37;
 
 void draw_maze(std::function<int (PackedCoord)> color_fn) {
+    return;
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
             if (maze[y][x] == 'E')
@@ -862,6 +863,8 @@ public:
 
         int qq = 0;
 
+        int total_candidates_size = 0;
+
         candidate_edges.clear();
         for (int num_edits = 0; num_edits <= 5; num_edits++) {
             if (num_edits == 5 && es.size() > 30)
@@ -884,6 +887,7 @@ public:
             }
             for (Edge &e : ef.edges) {
                 candidate_edges.push_back(e);
+                total_candidates_size += e.path_cells().size();
 
                 cnt[{e.from(), e.to() == EXIT}]++;
                 lengths[e.path_length()]++;
@@ -893,6 +897,7 @@ public:
             // debug(lengths);
         }
         debug(candidate_edges.size());
+        debug(total_candidates_size);
 
         vector<const Edge*> actual_edges;
         for (const Edge &e : candidate_edges) {
@@ -914,6 +919,65 @@ public:
             return -1;
         });*/
 
+        if (W * H > 1500) {
+            vector<string> result;
+            /// Greedy solution
+
+            sort(candidate_edges.begin(), candidate_edges.end(),
+                [](const Edge &e1, const Edge &e2){
+                    return e1.path_cells().size() > e2.path_cells().size();
+                });
+            int remaining_edits = F;
+            Graph solution;
+            for (const Edge &e : candidate_edges) {
+                if (e.from() > e.to() &&
+                    e.from() != ENTER &&
+                    e.to() != EXIT)
+                    continue;
+
+                bool contradicts = false;
+                for (const Edge *pe : solution) {
+                    if (pe->contradicts(e)) {
+                        contradicts = true;
+                        break;
+                    }
+                }
+                if (contradicts)
+                    continue;
+
+                if (e.edits().size() <= remaining_edits) {
+                    solution.push_back(&e);
+                    remaining_edits -= e.edits().size();
+
+                    if (get_time() > start_time + TIME_LIMIT) {
+                        cerr << "TIME LIMIT" << endl;
+                        break;
+                    }
+                }
+            }
+
+            for (const Edge *e : solution) {
+                for (auto kv : e->edits()) {
+                    PackedCoord p = kv.first;
+                    result.push_back(
+                        format_result(unpack_x(p), unpack_y(p), kv.second));
+                }
+            }
+            draw_maze([&](PackedCoord p) {
+                for (const Edge *e : solution)
+                    if (e->path_cells().contains(p))
+                        return RED;
+                return -1;
+            });
+
+            debug2(result.size(), F);
+
+            double total_time = get_time() - start_time;
+            debug(total_time);
+
+            return result;
+        }
+
         vector<string> result;
 
         Graph solution;
@@ -933,7 +997,7 @@ public:
                 copy(new_edges.begin(), new_edges.end(),
                      back_inserter(solution));
 
-                if (++qq % 50 == 0 && get_time() > start_time + TIME_LIMIT * 0.8) {
+                if (++qq % 30 == 0 && get_time() > start_time + TIME_LIMIT * 0.8) {
                     cerr << "greedy time limit" << endl;
                     break;
                 }
